@@ -1,80 +1,123 @@
-// main.js - wires routine + timer + UI together
-import { routine, nextIndex } from "./routine.js";
-import { createTimer } from "./timer.js";
-import {
-  renderClock, renderCountdown, renderUpcoming, renderRoutine,
-  highlightActive, showStatus, resetStatus, el,
-} from "./ui.js";
+// main.js — imports the other modules and wires them together.
 
-window.__modulesLoaded = true;
-document.getElementById("modeBadge").textContent =
-  location.protocol === "file:" ? "Direct File Mode: ES6 Module (file://)" : "ES6 Modules (http)";
+import { routine, ADVANCE_DELAY, MAX_SECONDS } from './routine.js';
+import { startClock } from './clock.js';
+import { createCountdown, watchTimeouts, after } from './timer.js';
+import * as ui from './ui.js';
 
-let current = 0;
-let advanceTimeout = null;
+const states = routine.map(() => 'pending'); // pending | next | active | live | done
+let index = 0;        // class currently loaded into the countdown
+let phase = 'ready';  // ready | running | paused | started | finished
 
-const timer = createTimer({
-  onTick: renderCountdown,
+const current = () => routine[index];
+
+/* ---------- Messages for each phase ---------- */
+
+function phaseMessage() {
+  switch (phase) {
+    case 'running':  return [`Counting down to ${current().subject}.`, 'info'];
+    case 'paused':   return ['Paused. Press Start to resume.', 'warn'];
+    case 'finished': return ['Routine complete. Press Reset to run it again.', 'success'];
+    default:         return ['Ready for the next class.', 'info'];
+  }
+}
+
+function applyPhase(next) {
+  phase = next;
+  if (phase === 'running' || phase === 'paused' || phase === 'ready') {
+    states[index] = phase === 'running' ? 'active' : 'next';
+    ui.renderRoutine(routine, states);
+  }
+  ui.renderPhase(phase);
+  ui.setStatus(...phaseMessage());
+  ui.setControls({
+    start: phase === 'ready' || phase === 'paused',
+    pause: phase === 'running',
+    reset: phase !== 'started',
+    set:   phase === 'ready' || phase === 'paused',
+  });
+}
+
+/* ---------- Countdown ---------- */
+
+const countdown = createCountdown({
+  onTick: (seconds) => ui.renderCountdown(seconds, phase === 'finished' ? '' : current().subject),
   onFinish: onClassStart,
+  onStateChange: ui.renderCountdownActive,
 });
 
-function loadClass(index) {
-  current = index;
-  renderUpcoming(routine[current]);
-  highlightActive(current);
-  timer.set(routine[current].duration);
+function loadClass(i) {
+  index = i;
+  states[i] = 'next';
+  countdown.load(current().duration);
+  ui.renderUpcoming(current());
+  ui.renderRoutine(routine, states);
+  applyPhase('ready');
 }
 
-// Timer reached zero -> notify with setTimeout, then move to the next class
+// Countdown hit zero: announce the class, then (setTimeout) move to the next one.
 function onClassStart() {
-  const started = routine[current];
-  showStatus(`🔔 Started: ${started.subject}!`);
-
-  advanceTimeout = setTimeout(() => {
-    loadClass(nextIndex(current));
-    resetStatus();
-    timer.start();
-  }, 3000);
+  states[index] = 'live';
+  ui.renderRoutine(routine, states);
+  applyPhase('started');
+  ui.setStatus(`Started: ${current().subject}!`, 'success');
+  after(ADVANCE_DELAY, advance);
 }
 
-function cancelAdvance() {
-  clearTimeout(advanceTimeout);
-  advanceTimeout = null;
+function advance() {
+  states[index] = 'done';
+  if (index + 1 < routine.length) {
+    loadClass(index + 1);
+    ui.flashStatus(`Next up: ${current().subject}.`, 'info', phaseMessage);
+  } else {
+    ui.renderRoutine(routine, states);
+    ui.renderUpcoming(null, { finished: true });
+    countdown.reset(0);
+    applyPhase('finished');
+  }
 }
 
-// ---- Controls (DOM event listeners) ----
-el.$("startBtn").addEventListener("click", () => {
-  cancelAdvance();
-  if (timer.remaining === 0) loadClass(current);
-  timer.start();
+/* ---------- Controls ---------- */
+
+document.getElementById('btn-start').addEventListener('click', () => {
+  if (countdown.start()) applyPhase('running');
 });
 
-el.$("pauseBtn").addEventListener("click", () => {
-  cancelAdvance();
-  timer.pause();
+document.getElementById('btn-pause').addEventListener('click', () => {
+  countdown.pause();
+  applyPhase('paused');
 });
 
-el.$("resetBtn").addEventListener("click", () => {
-  cancelAdvance();
-  loadClass(current);
-  resetStatus();
-});
-
-el.$("setBtn").addEventListener("click", () => {
-  const input = el.$("secondsInput");
-  const value = parseInt(input.value, 10);
-  if (!Number.isFinite(value) || value <= 0) {
-    showStatus("Enter a valid number of seconds.", 2000);
+document.getElementById('btn-reset').addEventListener('click', () => {
+  if (phase === 'finished') {
+    states.fill('pending');
+    loadClass(0);
     return;
   }
-  cancelAdvance();
-  timer.set(value);
-  input.value = "";
-  showStatus(`Countdown set to ${value}s.`, 2000);
+  countdown.reset(current().duration);
+  applyPhase('ready');
+  ui.flashStatus('Timer reset to the class duration.', 'info', phaseMessage);
 });
 
-// ---- Init ----
-renderRoutine();
+document.getElementById('set-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const raw = ui.readSeconds();
+  const seconds = Number(raw);
+  if (raw === '' || !Number.isInteger(seconds) || seconds < 1 || seconds > MAX_SECONDS) {
+    ui.flashStatus(`Enter a whole number from 1 to ${MAX_SECONDS}.`, 'error', phaseMessage);
+    return;
+  }
+  countdown.reset(seconds);
+  ui.clearSecondsInput();
+  applyPhase('ready');
+  ui.flashStatus(`Timer set to ${seconds} seconds.`, 'success', phaseMessage);
+});
+
+/* ---------- Start up ---------- */
+
+watchTimeouts(ui.renderTimeoutsWaiting);
+startClock(ui.renderClock);
+ui.renderClockActive(true);
+ui.renderCountdownActive(false);
 loadClass(0);
-renderClock();
-setInterval(renderClock, 1000);   // live clock
+ui.markModulesLoaded();
